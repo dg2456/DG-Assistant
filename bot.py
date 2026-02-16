@@ -9,67 +9,64 @@ from aiohttp import web
 load_dotenv()
 
 # --- CONFIG ---
-# Your Guild ID: 1472669051628032002
-MY_GUILD = discord.Object(id=1472669051628032002)
+# Your Guild ID for instant command updates
+GUILD_ID = 1472669051628032002 
+MY_GUILD = discord.Object(id=GUILD_ID)
 
 class MyBot(commands.Bot):
     def __init__(self):
-        # Intents.all() is required to manage roles and members across cogs
+        # Intents.all() is necessary for managing roles and member data
         intents = discord.Intents.all()
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
         """
-        Executed when the bot starts. This loads Cogs and syncs slash commands.
+        Loads all Python files from the /cogs folder and syncs them to your server.
         """
-        # 1. Load extensions from the /cogs folder
+        # 1. Load Cogs
         for filename in os.listdir('./cogs'):
             if filename.endswith('.py'):
                 try:
                     await self.load_extension(f'cogs.{filename[:-3]}')
-                    print(f"✅ Successfully loaded Cog: {filename}")
+                    print(f"✅ Loaded Cog: {filename}")
                 except Exception as e:
-                    print(f"❌ Failed to load Cog {filename}: {e}")
+                    print(f"❌ Error loading {filename}: {e}")
         
-        # 2. Sync commands specifically to your Guild for instant updates
-        # This prevents the "Application not responding" due to outdated command trees
+        # 2. Sync to Guild (Instant)
+        # This clears old commands and ensures the new ones work immediately.
         self.tree.copy_global_to(guild=MY_GUILD)
         await self.tree.sync(guild=MY_GUILD)
-        print(f"🚀 Slash commands synced to Guild ID: {MY_GUILD.id}")
+        print(f"🚀 Slash commands synced to Guild: {GUILD_ID}")
 
     async def on_ready(self):
         print(f'Logged in as {self.user} (ID: {self.user.id})')
-        print("Bot is fully operational and listening for commands.")
 
-# --- RENDER WEB SERVER (PORT 10000) ---
+# --- RENDER PORT BINDING (Fixes "Port 10000" errors) ---
 async def handle(request):
-    """Simple health check for Render's port binding."""
-    return web.Response(text="Bot is online and responsive.")
+    return web.Response(text="Bot is running!")
 
 async def start_server():
-    """Starts the aiohttp server on port 10000."""
     app = web.Application()
     app.router.add_get('/', handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    
-    # Render provides a PORT env var, defaults to 10000
+    # Render assigns a port via the PORT env var; defaults to 10000
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    print(f"📡 Web server listening on port {port}")
+    print(f"📡 Web server active on port {port}")
 
-# --- MAIN RUNNER ---
+# --- MAIN EXECUTION ---
 async def main():
     bot = MyBot()
     token = os.getenv("DISCORD_TOKEN")
     
     if not token:
-        print("❌ CRITICAL ERROR: DISCORD_TOKEN not found in environment variables.")
+        print("❌ ERROR: DISCORD_TOKEN is missing from Environment Variables!")
         return
 
-    # Run the web server and the bot simultaneously
     async with bot:
+        # Runs the web server and the bot at the same time
         await asyncio.gather(
             start_server(),
             bot.start(token)
@@ -79,4 +76,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Bot shutting down...")
+        pass
