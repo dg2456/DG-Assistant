@@ -8,7 +8,9 @@ from aiohttp import web
 load_dotenv()
 
 # --- CONFIG ---
-# We are removing the GUILD_ID restriction to make commands GLOBAL
+# Enter your Guild ID here one last time to CLEAR the duplicates
+MY_GUILD_ID = 1472669051628032002 
+
 class MyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.all()
@@ -20,17 +22,23 @@ class MyBot(commands.Bot):
             if filename.endswith('.py'):
                 try:
                     await self.load_extension(f'cogs.{filename[:-3]}')
-                    print(f"✅ Loaded Cog: {filename}")
+                    print(f"✅ Loaded: {filename}")
                 except Exception as e:
-                    print(f"❌ Error loading {filename}: {e}")
+                    print(f"❌ Error {filename}: {e}")
         
-        # 2. Register GLOBAL Commands
-        # This replaces the Guild sync. It may take up to 1 hour to appear everywhere.
-        await self.tree.sync() 
-        print("🚀 Global Slash commands synced to Discord API.")
+        # 2. CLEAR DUPLICATES
+        # This removes the commands from your specific server so only Global remains
+        guild = discord.Object(id=MY_GUILD_ID)
+        self.tree.clear_commands(guild=guild)
+        await self.tree.sync(guild=guild)
+        print(f"🗑️ Cleared duplicate commands from Guild {MY_GUILD_ID}")
+
+        # 3. SYNC GLOBAL
+        await self.tree.sync()
+        print("🚀 Global Slash commands synced.")
 
     async def on_ready(self):
-        print(f'Logged in as {self.user} (ID: {self.user.id})')
+        print(f'Logged in as {self.user}')
 
 # --- RENDER PORT BINDING ---
 async def handle(request):
@@ -48,16 +56,8 @@ async def start_server():
 async def main():
     bot = MyBot()
     token = os.getenv("DISCORD_TOKEN")
-    
-    if not token:
-        print("❌ ERROR: DISCORD_TOKEN is missing!")
-        return
-
     async with bot:
-        await asyncio.gather(
-            start_server(),
-            bot.start(token)
-        )
+        await asyncio.gather(start_server(), bot.start(token))
 
 if __name__ == "__main__":
     asyncio.run(main())
