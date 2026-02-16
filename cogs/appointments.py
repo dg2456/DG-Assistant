@@ -25,18 +25,25 @@ class AppointmentSystem(commands.Cog):
     def load_data(self):
         if not os.path.exists("data"): os.makedirs("data")
         try:
-            with open(self.data_path, "r") as f: self.data = json.load(f)
-        except: self.data = {"slots": [], "bookings": {}}
+            with open(self.data_path, "r") as f:
+                self.data = json.load(f)
+        except:
+            self.data = {"slots": [], "bookings": {}}
+        
+        # Safety: Ensure keys exist so you don't get "Error in set: 'slots'"
+        if "slots" not in self.data: self.data["slots"] = []
+        if "bookings" not in self.data: self.data["bookings"] = {}
 
     def save_data(self):
-        with open(self.data_path, "w") as f: json.dump(self.data, f, indent=4)
+        with open(self.data_path, "w") as f:
+            json.dump(self.data, f, indent=4)
 
     def is_dg(self, member):
         return any(role.id == DG_ROLE_ID for role in member.roles)
 
     # --- DG COMMANDS ---
 
-    @app_commands.command(name="appointment_set", description="DG Only: Set a time slot")
+    @app_commands.command(name="appointment_set", description="DG Only: Set a time slot (MM/DD and Time)")
     async def appt_set(self, itxn: discord.Interaction, date: str, time: str):
         await itxn.response.defer(ephemeral=True)
         try:
@@ -48,69 +55,112 @@ class AppointmentSystem(commands.Cog):
             await itxn.followup.send(f"✅ Slot Saved: `{date} @ {time}`")
         except Exception as e:
             await itxn.followup.send(f"⚠️ Error in set: {e}")
-            print(traceback.format_exc())
 
-    @app_commands.command(name="appointment_end", description="DG Only: Close session & Archive log")
+    @app_commands.command(name="appointment_open", description="DG Only: Open office and alert user")
+    async def appt_open(self, itxn: discord.Interaction, appt_id: str):
+        await itxn.response.defer(ephemeral=True)
+        try:
+            if not self.is_dg(itxn.user): return await itxn.followup.send("❌ Access Denied.")
+            
+            appt = self.data["bookings"].get(appt_id)
+            if not appt: return await itxn.followup.send("❌ Invalid Appointment ID.")
+            
+            member = await itxn.guild.fetch_member(appt["user_id"])
+            role = itxn.guild.get_role(OFFICE_ROLE_ID)
+            
+            if member and role:
+                await member.add_roles(role)
+                await itxn.followup.send(f"✅ Office opened for {member.mention}. 5m timer started.")
+                try:
+                    await member.send("DG has opened your appointment. Please join his office in 5 minutes or it will be removed.")
+                except: pass
+                
+                self.active_timers[appt_id] = True
+                await asyncio.sleep(300)
+                
+                if self.active_timers.get(appt_id) is True:
+                    await member.remove_roles(role)
+                    await itxn.followup.send(f"⏰ Timer expired for {member.mention}. Access removed.")
+        except Exception as e:
+            await itxn.followup.send(f"⚠️ Error in open: {e}")
+
+    @app_commands.command(name="appointment_start", description="DG Only: Confirm arrival and keep role")
+    async def appt_start(self, itxn: discord.Interaction, appt_id: str):
+        if not self.is_dg(itxn.user): return await itxn.response.send_message("❌ No permission.", ephemeral=True)
+        if appt_id in self.active_timers:
+            self.active_timers[appt_id] = False
+            await itxn.response.send_message(f"✅ Session started. Timer stopped for `{appt_id}`.", ephemeral=True)
+        else:
+            await itxn.response.send_message("❌ ID not found in active timers.", ephemeral=True)
+
+    @app_commands.command(name="appointment_end", description="DG Only: Remove roles and archive log")
     async def appt_end(self, itxn: discord.Interaction, appt_id: str):
         await itxn.response.defer(ephemeral=True)
         try:
             if not self.is_dg(itxn.user): return await itxn.followup.send("❌ Access Denied.")
-
             appt = self.data["bookings"].get(appt_id)
-            if not appt: return await itxn.followup.send(f"❌ ID `{appt_id}` not found.")
+            if not appt: return await itxn.followup.send("❌ Invalid ID.")
 
-            # Attempt to fetch member (more reliable than get_member)
-            try:
-                member = await itxn.guild.fetch_member(appt["user_id"])
-                o_role = itxn.guild.get_role(OFFICE_ROLE_ID)
-                c_role = itxn.guild.get_role(CLIENT_ROLE_ID)
-                if member:
-                    if o_role: await member.remove_roles(o_role)
-                    if c_role: await member.remove_roles(c_role)
-            except:
-                print("Could not update roles - member might have left.")
+            member = await itxn.guild.fetch_member(appt["user_id"])
+            o_role = itxn.guild.get_role(OFFICE_ROLE_ID)
+            c_role = itxn.guild.get_role(CLIENT_ROLE_ID)
+            if member:
+                if o_role: await member.remove_roles(o_role)
+                if c_role: await member.remove_roles(c_role)
 
-            # Archive Logic
             log_chan = self.bot.get_channel(LOG_CHAN_ID)
             archive_chan = self.bot.get_channel(ARCHIVE_CHAN_ID)
             
-            found_msg = False
             if log_chan and archive_chan:
                 async for msg in log_chan.history(limit=100):
-                    if msg.embeds and msg.embeds[0].footer and appt_id in (msg.embeds[0].footer.text or ""):
+                    if msg.embeds and appt_id in (msg.embeds[0].footer.text or ""):
                         await archive_chan.send(embed=msg.embeds[0])
                         await msg.delete()
-                        found_msg = True
                         break
 
             del self.data["bookings"][appt_id]
             self.save_data()
-            await itxn.followup.send(f"✅ Appointment `{appt_id}` ended and archived.")
-            
+            await itxn.followup.send(f"✅ Appointment `{appt_id}` archived and roles removed.")
         except Exception as e:
             await itxn.followup.send(f"⚠️ Error in end: {e}")
-            print(traceback.format_exc())
 
     # --- PUBLIC COMMANDS ---
 
     @app_commands.command(name="make_appointment", description="Book a session with DG")
     async def make_appt(self, itxn: discord.Interaction):
-        try:
-            if not self.data.get("slots"):
-                return await itxn.response.send_message("❌ No slots open.", ephemeral=True)
-            
-            embed = discord.Embed(title="DG Appointment Booking", color=discord.Color.blue())
-            desc = "\n".join([f"**{i+1}.** {s}" for i, s in enumerate(self.data['slots'])])
-            embed.description = f"**Available Times:**\n{desc}\n\nSelect a number below."
-            
-            await itxn.response.send_message(embed=embed, view=BookingFlow(self), ephemeral=True)
-        except Exception as e:
-            print(f"Error in make_appt: {e}")
+        if not self.data["slots"]:
+            return await itxn.response.send_message("❌ No slots available.", ephemeral=True)
+        
+        embed = discord.Embed(title="📅 DG Appointment Booking", color=discord.Color.blue())
+        desc = "\n".join([f"**{i+1}.** {s}" for i, s in enumerate(self.data['slots'])])
+        embed.description = f"**Available Times:**\n{desc}\n\nClick below to book."
+        await itxn.response.send_message(embed=embed, view=BookingFlow(self), ephemeral=True)
+
+    @app_commands.command(name="cancel_appointment", description="Cancel using your ID")
+    async def cancel_appt(self, itxn: discord.Interaction, appt_id: str):
+        appt = self.data["bookings"].get(appt_id)
+        if appt and appt["user_id"] == itxn.user.id:
+            del self.data["bookings"][appt_id]
+            self.save_data()
+            await itxn.response.send_message(f"✅ Appointment `{appt_id}` cancelled.", ephemeral=True)
+        else:
+            await itxn.response.send_message("❌ Invalid ID or not your appointment.", ephemeral=True)
 
     @tasks.loop(minutes=30)
     async def daily_check(self):
-        # Daily logic remains same
-        pass
+        today = datetime.datetime.now().strftime("%m/%d")
+        for aid, info in self.data["bookings"].items():
+            if info["time"].startswith(today) and not info.get("notified"):
+                chan = self.bot.get_channel(LOG_CHAN_ID)
+                if chan:
+                    embed = discord.Embed(title="📅 Appointment Today!", color=discord.Color.green())
+                    embed.add_field(name="User", value=f"<@{info['user_id']}>", inline=False)
+                    embed.add_field(name="Time", value=info['time'], inline=False)
+                    embed.add_field(name="Type", value=info.get('type', 'N/A'), inline=False)
+                    embed.set_footer(text=f"ID: {aid}")
+                    await chan.send(content=f"<@{DG_USER_ID}> You have an appointment today!", embed=embed)
+                    info["notified"] = True
+                    self.save_data()
 
 # --- UI LOGIC ---
 
@@ -125,7 +175,7 @@ class BookingFlow(discord.ui.View):
 
 class BookingModal(discord.ui.Modal, title="Booking Details"):
     day_num = TextInput(label="Slot Number", placeholder="e.g. 1")
-    appt_type = TextInput(label="Type", placeholder="Commission or Long Term")
+    appt_type = TextInput(label="Type", placeholder="Commission or Long Term Development")
     extra = TextInput(label="Extra Info", style=discord.TextStyle.paragraph, required=False)
 
     def __init__(self, cog):
@@ -154,10 +204,10 @@ class BookingModal(discord.ui.Modal, title="Booking Details"):
 
             await itxn.followup.send(f"✅ Success! Your ID is `{aid}`. Check your DMs.")
             try:
-                await itxn.user.send(f"✅ Appointment Confirmed!\n**ID:** `{aid}`\n**Time:** {slot}")
+                await itxn.user.send(f"✅ Appointment Confirmed!\n**ID:** `{aid}`\n**Time:** {slot}\n**Type:** {self.appt_type.value}")
             except: pass
         except Exception as e:
-            await itxn.followup.send(f"⚠️ Error in modal: {e}")
+            await itxn.followup.send(f"⚠️ Error: {e}")
 
 async def setup(bot):
     await bot.add_cog(AppointmentSystem(bot))
