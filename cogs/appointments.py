@@ -5,200 +5,153 @@ import json
 import uuid
 from datetime import datetime, timedelta
 import config
+import asyncio
+import os
 
-APPOINTMENTS_FILE = "data/appointments.json"
-SLOTS_FILE = "data/slots.json"
+DATA_FILE = "data/appointments.json"
 
-ACTIVE_ROLE_ID = 1472691907959460077
-STAFF_ROLE_ID = config.STAFF_ROLE_ID
-STAFF_PING_ROLE_ID = 1472681773577142459
-TODAY_CHANNEL_ID = 1472691188233539645
-COMPLETED_CHANNEL_ID = 1472765152138100787
+def load_data():
+    if not os.path.exists("data"):
+        os.makedirs("data")
+    if not os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "w") as f:
+            json.dump({}, f)
+    with open(DATA_FILE, "r") as f:
+        return json.load(f)
 
-
-# ---------------- JSON ---------------- #
-
-def load_json(path):
-    try:
-        with open(path, "r") as f:
-            return json.load(f)
-    except:
-        return {}
-
-def save_json(path, data):
-    with open(path, "w") as f:
+def save_data(data):
+    with open(DATA_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
-
-# ---------------- MODAL ---------------- #
-
-class ExtraInfoModal(discord.ui.Modal, title="Extra Appointment Information"):
-    info = discord.ui.TextInput(
-        label="Anything DG should know?",
-        style=discord.TextStyle.paragraph,
-        required=False,
-        max_length=500
-    )
-
-    def __init__(self, view):
-        super().__init__()
-        self.view = view
-
-    async def on_submit(self, interaction: discord.Interaction):
-        self.view.extra_info = self.info.value
-        await interaction.response.send_message("Extra information saved.", ephemeral=True)
-
-
-# ---------------- VIEW ---------------- #
-
 class AppointmentView(discord.ui.View):
-    def __init__(self, user, slot_id):
+    def __init__(self, bot, user, slot):
         super().__init__(timeout=300)
+        self.bot = bot
         self.user = user
-        self.slot_id = slot_id
-        self.type_selected = None
+        self.slot = slot
+        self.type = None
         self.extra_info = None
 
     @discord.ui.select(
         placeholder="Select Appointment Type",
         options=[
+            discord.SelectOption(label="Long Term Development"),
             discord.SelectOption(label="Commission"),
-            discord.SelectOption(label="Long Term Development")
         ]
     )
     async def select_type(self, interaction: discord.Interaction, select: discord.ui.Select):
         if interaction.user != self.user:
-            return await interaction.response.send_message("Not yours.", ephemeral=True)
+            return await interaction.response.send_message("Not your appointment.", ephemeral=True)
 
-        self.type_selected = select.values[0]
-        await interaction.response.send_message(
-            f"Selected: {self.type_selected}",
-            ephemeral=True
-        )
+        self.type = select.values[0]
+        await interaction.response.send_message("Type selected. Now click 'Add Extra Info'.", ephemeral=True)
 
-    @discord.ui.button(label="Add Extra Information", style=discord.ButtonStyle.secondary)
-    async def add_info(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Add Extra Info", style=discord.ButtonStyle.secondary)
+    async def extra_info_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user != self.user:
             return await interaction.response.send_message("Not yours.", ephemeral=True)
 
-        await interaction.response.send_modal(ExtraInfoModal(self))
+        await interaction.response.send_message("Reply with extra details for DG.", ephemeral=True)
+
+        def check(m):
+            return m.author == self.user and m.channel == interaction.channel
+
+        try:
+            msg = await self.bot.wait_for("message", timeout=120, check=check)
+            self.extra_info = msg.content
+            await interaction.followup.send("Extra info saved. Now click Confirm.", ephemeral=True)
+        except:
+            await interaction.followup.send("Timed out.", ephemeral=True)
 
     @discord.ui.button(label="Confirm Appointment", style=discord.ButtonStyle.success)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-
-        await interaction.response.defer(ephemeral=True)
-
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user != self.user:
-            return await interaction.followup.send("Not yours.", ephemeral=True)
+            return await interaction.response.send_message("Not yours.", ephemeral=True)
 
-        if not self.type_selected:
-            return await interaction.followup.send("Select a type first.", ephemeral=True)
+        if not self.type:
+            return await interaction.response.send_message("Select type first.", ephemeral=True)
 
-        appointments = load_json(APPOINTMENTS_FILE)
-        slots = load_json(SLOTS_FILE)
+        await interaction.response.defer()
 
-        # Prevent double booking
-        for data in appointments.values():
-            if data["user_id"] == interaction.user.id:
-                return await interaction.followup.send(
-                    "You already have an appointment booked.",
-                    ephemeral=True
-                )
+        data = load_data()
 
-        if self.slot_id not in slots:
-            return await interaction.followup.send("Slot already taken.", ephemeral=True)
+        for a in data.values():
+            if a["slot"] == self.slot:
+                return await interaction.followup.send("Slot already taken.", ephemeral=True)
 
         appointment_id = str(uuid.uuid4())[:8]
-        slot_value = slots[self.slot_id]
 
-        embed = discord.Embed(title="📅 New Appointment", color=discord.Color.green())
-        embed.add_field(name="ID", value=appointment_id, inline=False)
-        embed.add_field(name="User", value=interaction.user.mention, inline=False)
-        embed.add_field(name="Slot", value=slot_value, inline=False)
-        embed.add_field(name="Type", value=self.type_selected, inline=False)
-
-        if self.extra_info:
-            embed.add_field(name="Extra Info", value=self.extra_info, inline=False)
-
-        channel = interaction.guild.get_channel(TODAY_CHANNEL_ID)
-        message = await channel.send(
-            f"<@&{STAFF_PING_ROLE_ID}>",
-            embed=embed
-        )
-
-        appointments[appointment_id] = {
-            "user_id": interaction.user.id,
-            "slot": slot_value,
-            "type": self.type_selected,
+        data[appointment_id] = {
+            "user_id": self.user.id,
+            "slot": self.slot,
+            "type": self.type,
             "extra_info": self.extra_info,
-            "status": "booked",
-            "guild_id": interaction.guild.id,
-            "message_id": message.id,
-            "reminded": False
+            "message_id": interaction.message.id
         }
 
-        del slots[self.slot_id]
+        save_data(data)
 
-        save_json(APPOINTMENTS_FILE, appointments)
-        save_json(SLOTS_FILE, slots)
+        role = interaction.guild.get_role(config.PING_ROLE_ID)
+        ping = role.mention if role else ""
 
-        # DM user confirmation
+        embed = discord.Embed(
+            title="📅 New Appointment Booked",
+            description=f"**ID:** `{appointment_id}`\n"
+                        f"**User:** {self.user.mention}\n"
+                        f"**Time:** {self.slot}\n"
+                        f"**Type:** {self.type}\n"
+                        f"**Extra Info:** {self.extra_info or 'None'}",
+            color=discord.Color.green()
+        )
+
+        log_channel = interaction.guild.get_channel(config.LOG_CHANNEL_ID)
+        if log_channel:
+            await log_channel.send(content=ping, embed=embed)
+
         try:
-            await interaction.user.send(
-                f"✅ **Appointment Booked**\n\n"
-                f"ID: `{appointment_id}`\n"
-                f"Date: {slot_value}\n"
-                f"Type: {self.type_selected}\n"
-                f"Extra Info: {self.extra_info if self.extra_info else 'None'}"
-            )
+            await self.user.send(embed=embed)
         except:
             pass
 
-        await interaction.followup.send("Appointment booked. Check your DMs.", ephemeral=True)
+        await interaction.followup.send("✅ Appointment Confirmed!", ephemeral=True)
         self.stop()
-
-
-# ---------------- COG ---------------- #
 
 class Appointments(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.auto_cancel_loop.start()
-        self.daily_reminder_loop.start()
+        self.reminder_loop.start()
 
-    # ---------------- ADD SLOT ---------------- #
+    def cog_unload(self):
+        self.reminder_loop.cancel()
 
     @app_commands.command(name="appointment_set")
     async def appointment_set(self, interaction: discord.Interaction, date: str, time: str):
+        if not any(role.id == config.DG_ROLE_ID for role in interaction.user.roles):
+            return await interaction.response.send_message("DG only.", ephemeral=True)
 
-        await interaction.response.defer(ephemeral=True)
+        slot = f"{date} {time}"
+        data = load_data()
 
-        if not any(role.id == STAFF_ROLE_ID for role in interaction.user.roles):
-            return await interaction.followup.send("Not authorized.", ephemeral=True)
+        data[str(uuid.uuid4())[:6]] = {
+            "slot": slot,
+            "open": True
+        }
 
-        slots = load_json(SLOTS_FILE)
-        slot_id = str(len(slots) + 1)
+        save_data(data)
 
-        slots[slot_id] = f"{date} {time}"
-        save_json(SLOTS_FILE, slots)
-
-        await interaction.followup.send(f"Slot added: {date} {time}", ephemeral=True)
-
-    # ---------------- MAKE APPOINTMENT ---------------- #
+        await interaction.response.send_message(f"✅ Appointment slot set for {slot}")
 
     @app_commands.command(name="make_appointment")
     async def make_appointment(self, interaction: discord.Interaction):
-
         await interaction.response.defer(ephemeral=True)
 
-        slots = load_json(SLOTS_FILE)
+        data = load_data()
+        slots = [v["slot"] for v in data.values() if v.get("open")]
 
         if not slots:
-            return await interaction.followup.send("No slots available.", ephemeral=True)
+            return await interaction.followup.send("No open appointments.")
 
-        description = ""
-        for k, v in slots.items():
-            description += f"**{k}.** {v}\n"
+        description = "\n".join(f"{i+1}. {slot}" for i, slot in enumerate(slots))
 
         embed = discord.Embed(
             title="Available Appointments",
@@ -206,78 +159,74 @@ class Appointments(commands.Cog):
             color=discord.Color.blurple()
         )
 
-        await interaction.followup.send(embed=embed, ephemeral=True)
-        await interaction.followup.send(
-            "Reply with the number of the slot you want.",
-            ephemeral=True
-        )
+        view = AppointmentView(self.bot, interaction.user, slots[0])
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
-        def check(m):
-            return m.author == interaction.user and m.channel == interaction.channel
+    @app_commands.command(name="appointment_open")
+    async def appointment_open(self, interaction: discord.Interaction):
+        await interaction.response.send_message("Appointments are open.")
 
-        try:
-            msg = await self.bot.wait_for("message", timeout=60, check=check)
-            chosen = msg.content.strip()
+    @app_commands.command(name="appointment_end")
+    async def appointment_end(self, interaction: discord.Interaction):
+        await interaction.response.defer()
 
-            if chosen not in slots:
-                return await interaction.followup.send("Invalid slot.", ephemeral=True)
+        data = load_data()
+        today = datetime.now().strftime("%m/%d")
 
-            view = AppointmentView(interaction.user, chosen)
-            await interaction.followup.send(
-                "Complete your appointment:",
-                view=view,
-                ephemeral=True
+        removed = []
+
+        for key in list(data.keys()):
+            if today in data[key].get("slot", ""):
+                removed.append(data[key])
+                del data[key]
+
+        save_data(data)
+
+        log_channel = interaction.guild.get_channel(1472765152138100787)
+
+        for appt in removed:
+            embed = discord.Embed(
+                title="📁 Appointment Completed",
+                description=f"User: <@{appt['user_id']}>\nTime: {appt['slot']}",
+                color=discord.Color.red()
             )
-        except:
-            await interaction.followup.send("Timed out.", ephemeral=True)
+            if log_channel:
+                await log_channel.send(embed=embed)
 
-    # ---------------- AUTO CANCEL ---------------- #
+        await interaction.followup.send("Today's appointments ended.")
 
-    @tasks.loop(seconds=60)
-    async def auto_cancel_loop(self):
-        appointments = load_json(APPOINTMENTS_FILE)
-        now = datetime.utcnow()
+    @tasks.loop(minutes=1)
+    async def reminder_loop(self):
+        await self.bot.wait_until_ready()
+        data = load_data()
+        now = datetime.now()
 
-        changed = False
+        for appt_id, appt in data.items():
+            if "slot" not in appt:
+                continue
 
-        for aid, data in list(appointments.items()):
-            if data.get("status") == "open":
-                opened_at = datetime.fromisoformat(data["opened_at"])
-                if now - opened_at > timedelta(minutes=5):
-                    guild = self.bot.get_guild(data["guild_id"])
-                    if guild:
-                        member = guild.get_member(data["user_id"])
-                        role = guild.get_role(ACTIVE_ROLE_ID)
-                        if member and role:
-                            await member.remove_roles(role)
-                    del appointments[aid]
-                    changed = True
+            try:
+                appt_time = datetime.strptime(appt["slot"], "%m/%d %H:%M")
+                appt_time = appt_time.replace(year=now.year)
 
-        if changed:
-            save_json(APPOINTMENTS_FILE, appointments)
+                guild = self.bot.guilds[0]
+                role = guild.get_role(config.PING_ROLE_ID)
 
-    # ---------------- DAILY REMINDER ---------------- #
+                if appt_time.strftime("%m/%d") == now.strftime("%m/%d"):
+                    channel = guild.get_channel(config.LOG_CHANNEL_ID)
+                    if channel:
+                        await channel.send(
+                            f"{role.mention} 📅 Appointment is today for <@{appt['user_id']}>"
+                        )
 
-    @tasks.loop(minutes=5)
-    async def daily_reminder_loop(self):
-        appointments = load_json(APPOINTMENTS_FILE)
-        today = datetime.utcnow().strftime("%m/%d")
-
-        for aid, data in appointments.items():
-            if today in data.get("slot", "") and not data.get("reminded"):
-                guild = self.bot.get_guild(data["guild_id"])
-                channel = guild.get_channel(TODAY_CHANNEL_ID)
-
-                try:
-                    message = await channel.fetch_message(data["message_id"])
-                    await message.reply(
-                        f"<@&{STAFF_PING_ROLE_ID}> 📅 This appointment is TODAY."
-                    )
-                    data["reminded"] = True
-                    save_json(APPOINTMENTS_FILE, appointments)
-                except:
-                    pass
-
+                if 0 < (appt_time - now).total_seconds() <= 1800:
+                    channel = guild.get_channel(config.LOG_CHANNEL_ID)
+                    if channel:
+                        await channel.send(
+                            f"{role.mention} ⏰ 30 minute reminder for <@{appt['user_id']}>"
+                        )
+            except:
+                continue
 
 async def setup(bot):
     await bot.add_cog(Appointments(bot))
