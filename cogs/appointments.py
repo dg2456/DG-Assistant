@@ -61,7 +61,6 @@ class AppointmentView(discord.ui.View):
     async def select_type(self, interaction: discord.Interaction, select: discord.ui.Select):
         if interaction.user != self.user:
             return await interaction.response.send_message("Not yours.", ephemeral=True)
-
         self.type_selected = select.values[0]
         await interaction.response.send_message(f"Selected: {self.type_selected}", ephemeral=True)
 
@@ -69,25 +68,25 @@ class AppointmentView(discord.ui.View):
     async def add_details(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user != self.user:
             return await interaction.response.send_message("Not yours.", ephemeral=True)
-
         await interaction.response.send_modal(ExtraDetailsModal(self))
 
     @discord.ui.button(label="Confirm Appointment", style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user != self.user:
             return await interaction.response.send_message("Not yours.", ephemeral=True)
-
         if not self.type_selected:
             return await interaction.response.send_message("Please select appointment type.", ephemeral=True)
+
+        # ✅ Defer to prevent "Interaction Failed"
+        await interaction.response.defer(ephemeral=True)
 
         slots = load_json(SLOTS_FILE)
         appointments = load_json(APPOINTMENTS_FILE)
 
         if self.slot_id not in slots:
-            return await interaction.response.send_message("This slot was already taken.", ephemeral=True)
+            return await interaction.followup.send("This slot was already taken.", ephemeral=True)
 
         appointment_id = str(uuid.uuid4())[:8]
-
         appointment_data = {
             "user_id": self.user.id,
             "slot": slots[self.slot_id],
@@ -105,11 +104,13 @@ class AppointmentView(discord.ui.View):
         # Give appointment role
         role = interaction.guild.get_role(config.APPOINTMENT_ROLE_ID)
         if role:
-            await self.user.add_roles(role)
+            try:
+                await self.user.add_roles(role)
+            except:
+                pass
 
-        # 🔔 LOG TO CHANNEL
+        # Log to channel
         log_channel = interaction.guild.get_channel(config.REMINDER_CHANNEL_ID)
-
         if log_channel:
             embed = discord.Embed(
                 title="📅 New Appointment Booked",
@@ -119,16 +120,11 @@ class AppointmentView(discord.ui.View):
             embed.add_field(name="User", value=self.user.mention, inline=False)
             embed.add_field(name="Slot", value=appointment_data["slot"], inline=False)
             embed.add_field(name="Type", value=self.type_selected, inline=False)
-
             if self.extra_details:
                 embed.add_field(name="Extra Details", value=self.extra_details, inline=False)
+            await log_channel.send(content=f"<@{config.PING_USER_ID}>", embed=embed)
 
-            await log_channel.send(
-                content=f"<@{config.PING_USER_ID}>",
-                embed=embed
-            )
-
-        # 📩 TRY DM
+        # Try DM
         try:
             await self.user.send(
                 f"✅ **Appointment Confirmed**\n\n"
@@ -140,10 +136,8 @@ class AppointmentView(discord.ui.View):
         except:
             dm_status = "⚠️ I couldn't DM you. Please enable DMs."
 
-        await interaction.response.send_message(
-            f"Appointment confirmed! {dm_status}",
-            ephemeral=True
-        )
+        # Final followup
+        await interaction.followup.send(f"Appointment confirmed! {dm_status}", ephemeral=True)
 
         self.stop()
 
@@ -161,27 +155,17 @@ class Appointments(commands.Cog):
             return await interaction.response.send_message("Not authorized.", ephemeral=True)
 
         slots = load_json(SLOTS_FILE)
-
         slot_id = str(len(slots) + 1)
         slots[slot_id] = f"{date} {time}"
-
         save_json(SLOTS_FILE, slots)
-
-        await interaction.response.send_message(
-            f"✅ Added slot: {date} {time}",
-            ephemeral=True
-        )
+        await interaction.response.send_message(f"✅ Added slot: {date} {time}", ephemeral=True)
 
     # USER - MAKE APPOINTMENT
     @app_commands.command(name="make_appointment")
     async def make_appointment(self, interaction: discord.Interaction):
         slots = load_json(SLOTS_FILE)
-
         if not slots:
-            return await interaction.response.send_message(
-                "No appointment slots available.",
-                ephemeral=True
-            )
+            return await interaction.response.send_message("No appointment slots available.", ephemeral=True)
 
         description = ""
         for key, value in slots.items():
@@ -192,12 +176,8 @@ class Appointments(commands.Cog):
             description=description,
             color=discord.Color.blurple()
         )
-
         await interaction.response.send_message(embed=embed, ephemeral=True)
-        await interaction.followup.send(
-            "Reply with the number of the slot you want.",
-            ephemeral=True
-        )
+        await interaction.followup.send("Reply with the number of the slot you want.", ephemeral=True)
 
         def check(m):
             return m.author == interaction.user and m.channel == interaction.channel
@@ -205,17 +185,11 @@ class Appointments(commands.Cog):
         try:
             msg = await self.bot.wait_for("message", timeout=60, check=check)
             chosen = msg.content.strip()
-
             if chosen not in slots:
                 return await interaction.followup.send("Invalid selection.", ephemeral=True)
 
             view = AppointmentView(interaction.user, chosen)
-            await interaction.followup.send(
-                "Complete your appointment below:",
-                view=view,
-                ephemeral=True
-            )
-
+            await interaction.followup.send("Complete your appointment below:", view=view, ephemeral=True)
         except:
             await interaction.followup.send("Timed out.", ephemeral=True)
 
@@ -223,7 +197,6 @@ class Appointments(commands.Cog):
     @app_commands.command(name="cancel_appointment")
     async def cancel_appointment(self, interaction: discord.Interaction, appointment_id: str):
         appointments = load_json(APPOINTMENTS_FILE)
-
         if appointment_id not in appointments:
             return await interaction.response.send_message("Invalid ID.", ephemeral=True)
 
@@ -232,7 +205,6 @@ class Appointments(commands.Cog):
 
         del appointments[appointment_id]
         save_json(APPOINTMENTS_FILE, appointments)
-
         await interaction.response.send_message("Appointment cancelled.", ephemeral=True)
 
 
