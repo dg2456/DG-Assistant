@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
 import os
+import asyncio
 
 intents = discord.Intents.all()
 
@@ -14,16 +15,25 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
     try:
         synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} commands.")
+        print(f"Synced {len(synced)} slash commands.")
     except Exception as e:
-        print(e)
+        print(f"Slash sync failed: {e}")
 
-async def load():
+async def load_cogs():
     for file in os.listdir("./cogs"):
         if file.endswith(".py"):
             await bot.load_extension(f"cogs.{file[:-3]}")
+            print(f"Loaded cog: {file}")
 
-import asyncio
-asyncio.run(load())
+async def main():
+    TOKEN = os.getenv("TOKEN")
 
-bot.run("YOUR_BOT_TOKEN")
+    if not TOKEN:
+        raise ValueError("❌ TOKEN environment variable not found.")
+
+    async with bot:
+        await load_cogs()
+        await bot.start(TOKEN)
+
+if __name__ == "__main__":
+    asyncio.run(main())
