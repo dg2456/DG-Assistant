@@ -5,8 +5,11 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from aiohttp import web
 
-# Load .env for local testing
 load_dotenv()
+
+# --- CONFIG ---
+# Put your Server ID here for instant command syncing
+GUILD_ID = 1472669051628032002  # <--- REPLACE THIS WITH YOUR SERVER ID
 
 class MyBot(commands.Bot):
     def __init__(self):
@@ -14,54 +17,38 @@ class MyBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # Load Cogs from the /cogs folder
+        # Load Cogs
         for filename in os.listdir('./cogs'):
             if filename.endswith('.py'):
-                try:
-                    await self.load_extension(f'cogs.{filename[:-3]}')
-                    print(f"✅ Loaded: {filename}")
-                except Exception as e:
-                    print(f"❌ Failed {filename}: {e}")
+                await self.load_extension(f'cogs.{filename[:-3]}')
+                print(f"✅ Loaded Cog: {filename}")
         
-        await self.tree.sync()
-        print("Slash commands synced.")
+        # Syncing Logic
+        guild = discord.Object(id=GUILD_ID)
+        self.tree.copy_global_to(guild=guild)
+        await self.tree.sync(guild=guild)
+        print(f"✅ Synced commands to guild: {GUILD_ID}")
 
     async def on_ready(self):
         print(f'Logged in as {self.user}')
 
-# --- KEEP ALIVE WEB SERVER FOR RENDER ---
+# --- RENDER PORT BINDING ---
 async def handle(request):
-    return web.Response(text="Bot is running!")
+    return web.Response(text="Bot is alive!")
 
 async def start_server():
     app = web.Application()
     app.router.add_get('/', handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    # Render uses environment variable PORT, defaults to 10000
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    print(f"Web server started on port {port}")
 
-# --- MAIN RUNNER ---
 async def main():
     bot = MyBot()
-    token = os.getenv("DISCORD_TOKEN")
-    
-    if not token:
-        print("ERROR: DISCORD_TOKEN is missing!")
-        return
-
-    # Run the web server and bot together
     async with bot:
-        await asyncio.gather(
-            start_server(),
-            bot.start(token)
-        )
+        await asyncio.gather(start_server(), bot.start(os.getenv("DISCORD_TOKEN")))
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    asyncio.run(main())
