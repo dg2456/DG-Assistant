@@ -30,6 +30,25 @@ def save_json(path, data):
         json.dump(data, f, indent=4)
 
 
+# ---------------- MODAL ---------------- #
+
+class ExtraInfoModal(discord.ui.Modal, title="Extra Appointment Information"):
+    info = discord.ui.TextInput(
+        label="Anything DG should know?",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=500
+    )
+
+    def __init__(self, view):
+        super().__init__()
+        self.view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.view.extra_info = self.info.value
+        await interaction.response.send_message("Extra information saved.", ephemeral=True)
+
+
 # ---------------- VIEW ---------------- #
 
 class AppointmentView(discord.ui.View):
@@ -38,6 +57,7 @@ class AppointmentView(discord.ui.View):
         self.user = user
         self.slot_id = slot_id
         self.type_selected = None
+        self.extra_info = None
 
     @discord.ui.select(
         placeholder="Select Appointment Type",
@@ -55,6 +75,13 @@ class AppointmentView(discord.ui.View):
             f"Selected: {self.type_selected}",
             ephemeral=True
         )
+
+    @discord.ui.button(label="Add Extra Information", style=discord.ButtonStyle.secondary)
+    async def add_info(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.user:
+            return await interaction.response.send_message("Not yours.", ephemeral=True)
+
+        await interaction.response.send_modal(ExtraInfoModal(self))
 
     @discord.ui.button(label="Confirm Appointment", style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -82,12 +109,16 @@ class AppointmentView(discord.ui.View):
             return await interaction.followup.send("Slot already taken.", ephemeral=True)
 
         appointment_id = str(uuid.uuid4())[:8]
+        slot_value = slots[self.slot_id]
 
         embed = discord.Embed(title="📅 New Appointment", color=discord.Color.green())
-        embed.add_field(name="ID", value=appointment_id)
-        embed.add_field(name="User", value=interaction.user.mention)
-        embed.add_field(name="Slot", value=slots[self.slot_id])
-        embed.add_field(name="Type", value=self.type_selected)
+        embed.add_field(name="ID", value=appointment_id, inline=False)
+        embed.add_field(name="User", value=interaction.user.mention, inline=False)
+        embed.add_field(name="Slot", value=slot_value, inline=False)
+        embed.add_field(name="Type", value=self.type_selected, inline=False)
+
+        if self.extra_info:
+            embed.add_field(name="Extra Info", value=self.extra_info, inline=False)
 
         channel = interaction.guild.get_channel(TODAY_CHANNEL_ID)
         message = await channel.send(
@@ -97,8 +128,9 @@ class AppointmentView(discord.ui.View):
 
         appointments[appointment_id] = {
             "user_id": interaction.user.id,
-            "slot": slots[self.slot_id],
+            "slot": slot_value,
             "type": self.type_selected,
+            "extra_info": self.extra_info,
             "status": "booked",
             "guild_id": interaction.guild.id,
             "message_id": message.id,
@@ -110,7 +142,19 @@ class AppointmentView(discord.ui.View):
         save_json(APPOINTMENTS_FILE, appointments)
         save_json(SLOTS_FILE, slots)
 
-        await interaction.followup.send("Appointment booked.", ephemeral=True)
+        # DM user confirmation
+        try:
+            await interaction.user.send(
+                f"✅ **Appointment Booked**\n\n"
+                f"ID: `{appointment_id}`\n"
+                f"Date: {slot_value}\n"
+                f"Type: {self.type_selected}\n"
+                f"Extra Info: {self.extra_info if self.extra_info else 'None'}"
+            )
+        except:
+            pass
+
+        await interaction.followup.send("Appointment booked. Check your DMs.", ephemeral=True)
         self.stop()
 
 
