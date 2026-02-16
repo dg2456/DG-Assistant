@@ -8,8 +8,8 @@ from aiohttp import web
 load_dotenv()
 
 # --- CONFIG ---
-# Your Guild ID: 1472669051628032002
-MY_GUILD = discord.Object(id=1472669051628032002)
+GUILD_ID = 1472669051628032002 
+MY_GUILD = discord.Object(id=GUILD_ID)
 
 class MyBot(commands.Bot):
     def __init__(self):
@@ -17,43 +17,29 @@ class MyBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # 1. Load the Cogs
+        # Load Cogs
         for filename in os.listdir('./cogs'):
             if filename.endswith('.py'):
-                try:
-                    await self.load_extension(f'cogs.{filename[:-3]}')
-                    print(f"✅ Loaded Cog: {filename}")
-                except Exception as e:
-                    print(f"❌ Failed to load {filename}: {e}")
+                await self.load_extension(f'cogs.{filename[:-3]}')
         
-        # 2. Sync to your specific Server (Instant update)
+        # Force Instant Sync to your server
         self.tree.copy_global_to(guild=MY_GUILD)
         await self.tree.sync(guild=MY_GUILD)
-        print(f"🚀 Slash commands synced to Guild: {MY_GUILD.id}")
+        print(f"✅ Synced to Guild {GUILD_ID}")
 
-    async def on_ready(self):
-        print(f'Logged in as {self.user} (ID: {self.user.id})')
-
-# --- RENDER WEB SERVER ---
-async def handle(request):
-    return web.Response(text="Bot is running!")
-
+# --- RENDER PORT BINDING (Port 10000) ---
 async def start_server():
     app = web.Application()
-    app.router.add_get('/', handle)
+    app.router.add_get('/', lambda r: web.Response(text="Bot Active"))
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, '0.0.0.0', port)
+    site = web.TCPSite(runner, '0.0.0.0', 10000)
     await site.start()
 
 async def main():
     bot = MyBot()
     async with bot:
-        await asyncio.gather(
-            start_server(),
-            bot.start(os.getenv("DISCORD_TOKEN"))
-        )
+        await asyncio.gather(start_server(), bot.start(os.getenv("DISCORD_TOKEN")))
 
 if __name__ == "__main__":
     asyncio.run(main())
