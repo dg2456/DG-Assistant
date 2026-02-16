@@ -88,7 +88,7 @@ class AppointmentView(discord.ui.View):
 
         appointment_id = str(uuid.uuid4())[:8]
 
-        appointments[appointment_id] = {
+        appointment_data = {
             "user_id": self.user.id,
             "slot": slots[self.slot_id],
             "type": self.type_selected,
@@ -96,7 +96,7 @@ class AppointmentView(discord.ui.View):
             "created_at": str(datetime.utcnow())
         }
 
-        # Remove slot after booking
+        appointments[appointment_id] = appointment_data
         del slots[self.slot_id]
 
         save_json(APPOINTMENTS_FILE, appointments)
@@ -107,16 +107,41 @@ class AppointmentView(discord.ui.View):
         if role:
             await self.user.add_roles(role)
 
-        # DM confirmation
-        await self.user.send(
-            f"✅ **Appointment Confirmed**\n\n"
-            f"ID: `{appointment_id}`\n"
-            f"Date: {appointments[appointment_id]['slot']}\n"
-            f"Type: {self.type_selected}"
-        )
+        # 🔔 LOG TO CHANNEL
+        log_channel = interaction.guild.get_channel(config.REMINDER_CHANNEL_ID)
+
+        if log_channel:
+            embed = discord.Embed(
+                title="📅 New Appointment Booked",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Appointment ID", value=appointment_id, inline=False)
+            embed.add_field(name="User", value=self.user.mention, inline=False)
+            embed.add_field(name="Slot", value=appointment_data["slot"], inline=False)
+            embed.add_field(name="Type", value=self.type_selected, inline=False)
+
+            if self.extra_details:
+                embed.add_field(name="Extra Details", value=self.extra_details, inline=False)
+
+            await log_channel.send(
+                content=f"<@{config.PING_USER_ID}>",
+                embed=embed
+            )
+
+        # 📩 TRY DM
+        try:
+            await self.user.send(
+                f"✅ **Appointment Confirmed**\n\n"
+                f"ID: `{appointment_id}`\n"
+                f"Date: {appointment_data['slot']}\n"
+                f"Type: {self.type_selected}"
+            )
+            dm_status = "Check your DMs."
+        except:
+            dm_status = "⚠️ I couldn't DM you. Please enable DMs."
 
         await interaction.response.send_message(
-            "Appointment confirmed! Check your DMs.",
+            f"Appointment confirmed! {dm_status}",
             ephemeral=True
         )
 
