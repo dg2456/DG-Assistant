@@ -4,7 +4,7 @@ from discord.ext import commands, tasks
 from discord.ui import View, Modal, TextInput
 import json, os, uuid, asyncio, datetime
 
-# --- CONFIGURATION (Ensure these IDs are 100% correct) ---
+# --- CONFIGURATION ---
 DG_ROLE_ID = 1472681773577142459
 DG_USER_ID = 891113337579008061
 CLIENT_ROLE_ID = 1472691982357758032
@@ -30,21 +30,12 @@ class AppointmentSystem(commands.Cog):
     def save_data(self):
         with open(self.data_path, "w") as f: json.dump(self.data, f, indent=4)
 
-    # Helper to check permissions without crashing
     def is_dg(self, member):
         return any(role.id == DG_ROLE_ID for role in member.roles)
 
-    @app_commands.command(name="appointment_set", description="DG Only: Set a time slot")
-    async def appt_set(self, itxn: discord.Interaction, date: str, time: str):
-        if not self.is_dg(itxn.user):
-            return await itxn.response.send_message("❌ No permission.", ephemeral=True)
-        
-        self.data["slots"].append(f"{date} @ {time}")
-        self.save_data()
-        await itxn.response.send_message(f"✅ Added slot: `{date} @ {time}`", ephemeral=True)
-
-    @app_commands.command(name="make_appointment", description="Book a session")
+    @app_commands.command(name="make_appointment", description="Book a session with DG")
     async def make_appt(self, itxn: discord.Interaction):
+        # We respond immediately to the interaction
         if not self.data.get("slots"):
             return await itxn.response.send_message("❌ No slots available.", ephemeral=True)
         
@@ -54,11 +45,14 @@ class AppointmentSystem(commands.Cog):
         
         await itxn.response.send_message(embed=embed, view=BookingFlow(self), ephemeral=True)
 
-    @app_commands.command(name="appointment_open", description="DG Only: Open office")
+    @app_commands.command(name="appointment_open", description="DG Only: Open office (ID Required)")
     async def appt_open(self, itxn: discord.Interaction, appt_id: str):
-        # 1. Immediate Deferral (Prevents "not responding")
+        # DEFER FIRST: Stops the "not responding" error
         await itxn.response.defer(ephemeral=True)
         
+        if not self.is_dg(itxn.user):
+            return await itxn.followup.send("❌ No permission.")
+
         appt = self.data["bookings"].get(appt_id)
         if not appt: return await itxn.followup.send("❌ Invalid ID.")
         
@@ -67,7 +61,7 @@ class AppointmentSystem(commands.Cog):
         
         if member and role:
             await member.add_roles(role)
-            try: await member.send("🔔 DG has opened your appointment. Join in 5m.")
+            try: await member.send(f"🔔 DG has opened your appointment. Join his office in 5 minutes.")
             except: pass
             
             await itxn.followup.send(f"✅ Opened for {member.mention}. 5m timer started.")
@@ -76,19 +70,45 @@ class AppointmentSystem(commands.Cog):
             
             if self.active_timers.get(appt_id) is True:
                 await member.remove_roles(role)
-                await itxn.followup.send(f"⏰ Time expired for {member.mention}.")
+                await itxn.followup.send(f"⏰ Time expired for {member.mention}. Access removed.")
 
-    @app_commands.command(name="appointment_start", description="Stop the timer")
-    async def appt_start(self, itxn: discord.Interaction, appt_id: str):
-        if appt_id in self.active_timers:
-            self.active_timers[appt_id] = False
-            await itxn.response.send_message(f"✅ Session `{appt_id}` started.", ephemeral=True)
-        else:
-            await itxn.response.send_message("❌ ID not found in active timers.", ephemeral=True)
+    @app_commands.command(name="appointment_end", description="DG Only: Close session & archive (ID Required)")
+    async def appt_end(self, itxn: discord.Interaction, appt_id: str):
+        # DEFER FIRST: Moving messages takes time
+        await itxn.response.defer(ephemeral=True)
+
+        if not self.is_dg(itxn.user):
+            return await itxn.followup.send("❌ No permission.")
+
+        appt = self.data["bookings"].get(appt_id)
+        if not appt: return await itxn.followup.send("❌ Invalid ID.")
+
+        member = itxn.guild.get_member(appt["user_id"])
+        o_role = itxn.guild.get_role(OFFICE_ROLE_ID)
+        c_role = itxn.guild.get_role(CLIENT_ROLE_ID)
+
+        if member:
+            if o_role: await member.remove_roles(o_role)
+            if c_role: await member.remove_roles(c_role)
+
+        # Move logs from Log Channel to Archive Channel
+        log_chan = self.bot.get_channel(LOG_CHAN_ID)
+        archive_chan = self.bot.get_channel(ARCHIVE_CHAN_ID)
+        
+        if log_chan and archive_chan:
+            async for msg in log_chan.history(limit=100):
+                if msg.embeds and appt_id in (msg.embeds[0].footer.text or ""):
+                    await archive_chan.send(embed=msg.embeds[0])
+                    await msg.delete()
+                    break
+
+        del self.data["bookings"][appt_id]
+        self.save_data()
+        await itxn.followup.send(f"✅ Appointment `{appt_id}` ended and archived.")
 
     @tasks.loop(minutes=30)
     async def daily_check(self):
-        # Task logic remains the same
+        # ... logic as before ...
         pass
 
 # --- UI CLASSES ---
@@ -99,7 +119,7 @@ class BookingFlow(discord.ui.View):
 
     @discord.ui.button(label="Book Now", style=discord.ButtonStyle.primary)
     async def book_btn(self, itxn: discord.Interaction, btn: discord.ui.Button):
-        # Modal is a "response," so it doesn't need a deferral beforehand
+        # Modals don't need deferral because the Modal itself IS the response
         await itxn.response.send_modal(BookingModal(self.cog))
 
 class BookingModal(discord.ui.Modal, title="Appointment Details"):
@@ -112,7 +132,7 @@ class BookingModal(discord.ui.Modal, title="Appointment Details"):
         self.cog = cog
 
     async def on_submit(self, itxn: discord.Interaction):
-        # 1. Defer Modal Submission
+        # DEFER FIRST: Logic + Role adding takes time
         await itxn.response.defer(ephemeral=True)
         
         try:
@@ -124,7 +144,7 @@ class BookingModal(discord.ui.Modal, title="Appointment Details"):
         aid = str(uuid.uuid4())[:8]
         self.cog.data["bookings"][aid] = {
             "user_id": itxn.user.id, "time": slot,
-            "type": self.appt_type.value, "notified": False
+            "type": self.appt_type.value, "info": self.extra.value, "notified": False
         }
         self.cog.data["slots"].pop(idx)
         self.cog.save_data()
@@ -132,8 +152,10 @@ class BookingModal(discord.ui.Modal, title="Appointment Details"):
         role = itxn.guild.get_role(CLIENT_ROLE_ID)
         if role: await itxn.user.add_roles(role)
 
-        # Use followup because we deferred
-        await itxn.followup.send(f"✅ Success! ID: `{aid}`")
+        await itxn.followup.send(f"✅ Success! Your ID is `{aid}`. Check your DMs.")
+        try:
+            await itxn.user.send(f"✅ Appointment Confirmed!\n**ID:** `{aid}`\n**Time:** {slot}")
+        except: pass
 
 async def setup(bot):
     await bot.add_cog(AppointmentSystem(bot))
