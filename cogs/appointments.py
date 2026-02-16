@@ -1,145 +1,129 @@
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-from discord.ui import Select, View, Button, Modal, TextInput
-import json
-import os
-import uuid
-import datetime
-import asyncio
+import json, os, uuid, asyncio, datetime
 
-# --- CONFIGURATION (Ensure these match your Server) ---
-DG_ROLE_ID = 1472681773577142459
-DG_USER_ID = 891113337579008061
-APPT_ROLE_ID = 1472691982357758032
-OFFICE_ACCESS_ROLE_ID = 1472691907959460077
-LOG_CHANNEL_ID = 1472691188233539645
-ARCHIVE_CHANNEL_ID = 1472765152138100787
-
-DATA_FILE = "data/appointments.json"
+# IDs from your request
+DG_ROLE = 1472681773577142459
+DG_USER = 891113337579008061
+CLIENT_ROLE = 1472691982357758032
+OFFICE_ROLE = 1472691907959460077
+LOG_CHAN = 1472691188233539645
+ARCHIVE_CHAN = 1472765152138100787
 
 class AppointmentSystem(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.load_data()
-        self.check_appointments_loop.start()
+        self.data_path = "data/appointments.json"
         self.active_timers = {}
+        self.load_data()
+        self.daily_check.start()
 
     def load_data(self):
-        if not os.path.exists("data"):
-            os.makedirs("data")
-        if not os.path.exists(DATA_FILE):
-            self.data = {"open_slots": [], "appointments": {}}
-            self.save_data()
-        else:
-            with open(DATA_FILE, "r") as f:
-                self.data = json.load(f)
+        if not os.path.exists("data"): os.makedirs("data")
+        try:
+            with open(self.data_path, "r") as f: self.data = json.load(f)
+        except: self.data = {"slots": [], "bookings": {}}
 
     def save_data(self):
-        with open(DATA_FILE, "w") as f:
-            json.dump(self.data, f, indent=4)
+        with open(self.data_path, "w") as f: json.dump(self.data, f, indent=4)
 
-    def is_dg(self, interaction: discord.Interaction):
-        return interaction.user.get_role(DG_ROLE_ID) is not None
-
-    @app_commands.command(name="appointment_set", description="Set an open appointment slot (DG Only)")
-    async def appointment_set(self, interaction: discord.Interaction, date: str, time: str):
-        if not self.is_dg(interaction):
-            return await interaction.response.send_message("Missing Permissions.", ephemeral=True)
-        slot = f"{date} {time}"
-        self.data["open_slots"].append(slot)
+    @app_commands.command(name="appointment_set", description="DG Only: Set a time slot")
+    async def appt_set(self, itxn: discord.Interaction, date: str, time: str):
+        if not itxn.user.get_role(DG_ROLE): return await itxn.response.send_message("No permission.", ephemeral=True)
+        self.data["slots"].append(f"{date} @ {time}")
         self.save_data()
-        await interaction.response.send_message(f"Added slot: `{slot}`", ephemeral=True)
+        await itxn.response.send_message(f"Added: {date} @ {time}", ephemeral=True)
 
-    @app_commands.command(name="make_appointment", description="Book an appointment")
-    async def make_appointment(self, interaction: discord.Interaction):
-        slots = self.data["open_slots"]
-        if not slots:
-            return await interaction.response.send_message("No slots available.", ephemeral=True)
-        view = BookingView(self, slots[:25])
-        embed = discord.Embed(title="Book an Appointment", color=discord.Color.blue())
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
-    @app_commands.command(name="appointment_open", description="Open access (DG Only)")
-    async def appointment_open(self, interaction: discord.Interaction, appt_id: str):
-        if not self.is_dg(interaction): return
-        appt = self.data["appointments"].get(appt_id)
-        if not appt: return await interaction.response.send_message("Invalid ID.", ephemeral=True)
+    @app_commands.command(name="make_appointment", description="Book a session with DG")
+    async def make_appt(self, itxn: discord.Interaction):
+        if not self.data["slots"]: return await itxn.response.send_message("No open slots.", ephemeral=True)
         
-        member = interaction.guild.get_member(appt["user_id"])
-        role = interaction.guild.get_role(OFFICE_ACCESS_ROLE_ID)
-        if member and role:
+        embed = discord.Embed(title="DG Appointment Booking", color=discord.Color.blue())
+        desc = "\n".join([f"{i+1}. {s}" for i, s in enumerate(self.data['slots'])])
+        embed.description = f"**Available Times:**\n{desc}"
+        
+        await itxn.response.send_message(embed=embed, view=BookingFlow(self), ephemeral=True)
+
+    @app_commands.command(name="appointment_open", description="DG Only: Open office")
+    async def appt_open(self, itxn: discord.Interaction, appt_id: str):
+        appt = self.data["bookings"].get(appt_id)
+        if not appt: return await itxn.response.send_message("Invalid ID.", ephemeral=True)
+        
+        member = itxn.guild.get_member(appt["user_id"])
+        if member:
+            role = itxn.guild.get_role(OFFICE_ROLE)
             await member.add_roles(role)
-            await interaction.response.send_message(f"Opened for {member.mention}.", ephemeral=True)
-            self.active_timers[appt_id] = "waiting"
+            await member.send(f"DG has opened your appointment. Join his office in 5 mins or it will be removed.")
+            await itxn.response.send_message(f"Office opened for {member.display_name}", ephemeral=True)
+            
+            self.active_timers[appt_id] = True
             await asyncio.sleep(300)
-            if self.active_timers.get(appt_id) == "waiting":
+            if self.active_timers.get(appt_id):
                 await member.remove_roles(role)
-                del self.active_timers[appt_id]
+                await itxn.followup.send(f"Time expired for {member.mention}. Role removed.")
 
-    @app_commands.command(name="appointment_start", description="Confirm user arrived (DG Only)")
-    async def appointment_start(self, interaction: discord.Interaction, appt_id: str):
+    @app_commands.command(name="appointment_start", description="DG Only: Start the session")
+    async def appt_start(self, itxn: discord.Interaction, appt_id: str):
         if appt_id in self.active_timers:
-            self.active_timers[appt_id] = "started"
-            await interaction.response.send_message("Timer stopped. Role kept.", ephemeral=True)
+            self.active_timers[appt_id] = False
+            await itxn.response.send_message(f"Session {appt_id} started. Timer stopped.", ephemeral=True)
 
-    @tasks.loop(minutes=1)
-    async def check_appointments_loop(self):
-        now = datetime.datetime.now().strftime("%m/%d")
-        for aid, info in self.data["appointments"].items():
-            if info["time"].startswith(now) and not info.get("logged_today"):
-                chan = self.bot.get_channel(LOG_CHANNEL_ID)
+    @tasks.loop(minutes=30)
+    async def daily_check(self):
+        today = datetime.datetime.now().strftime("%m/%d")
+        for aid, info in self.data["bookings"].items():
+            if info["time"].startswith(today) and not info.get("notified"):
+                chan = self.bot.get_channel(LOG_CHAN)
                 if chan:
-                    await chan.send(f"<@{DG_USER_ID}> Appointment today with <@{info['user_id']}>!")
-                    self.data["appointments"][aid]["logged_today"] = True
+                    await chan.send(f"<@{DG_USER}> Appointment today! ID: {aid} with <@{info['user_id']}>")
+                    info["notified"] = True
                     self.save_data()
 
-# --- UI CLASSES ---
-class BookingView(View):
-    def __init__(self, cog, slots):
-        super().__init__()
+# --- UI FOR BOOKING ---
+class BookingFlow(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=None)
         self.cog = cog
-        self.slot = None
-        self.type = None
-        select = Select(placeholder="Choose Time", options=[discord.SelectOption(label=s, value=s) for s in slots])
-        select.callback = self.select_callback
-        self.add_item(select)
+        self.selected_slot = None
+        self.selected_type = None
 
-    async def select_callback(self, interaction: discord.Interaction):
-        self.slot = interaction.data['values'][0]
-        view = TypeView(self.cog, self.slot)
-        await interaction.response.edit_message(content=f"Time: {self.slot}. Pick Type:", view=view, embed=None)
+    @discord.ui.button(label="1. Select Day & Type", style=discord.ButtonStyle.grey)
+    async def step_one(self, itxn: discord.Interaction, btn: discord.ui.Button):
+        modal = BookingModal(self)
+        await itxn.response.send_modal(modal)
 
-class TypeView(View):
-    def __init__(self, cog, slot):
+class BookingModal(discord.ui.Modal, title="Booking Details"):
+    day_num = discord.ui.TextInput(label="Slot Number (e.g. 1)", placeholder="Enter the number from the list")
+    type = discord.ui.TextInput(label="Type (Commission or Long Term)", placeholder="Commission / Long Term Development")
+    extra = discord.ui.TextInput(label="Extra Info", style=discord.TextStyle.paragraph, required=False)
+
+    def __init__(self, view):
         super().__init__()
-        self.cog, self.slot = cog, slot
+        self.view = view
 
-    @discord.ui.button(label="Commission", style=discord.ButtonStyle.primary)
-    async def comm(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_modal(DetailsModal(self.cog, self.slot, "Commission"))
+    async name(self): pass # placeholder
 
-    @discord.ui.button(label="Long Term Dev", style=discord.ButtonStyle.primary)
-    async def ltd(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_modal(DetailsModal(self.cog, self.slot, "Long Term Development"))
+    async def on_submit(self, itxn: discord.Interaction):
+        try:
+            idx = int(self.day_num.value) - 1
+            slot = self.view.cog.data["slots"][idx]
+        except:
+            return await itxn.response.send_message("Invalid slot number!", ephemeral=True)
 
-class DetailsModal(Modal, title="Extra Info"):
-    info = TextInput(label="Details", style=discord.TextStyle.paragraph)
-    def __init__(self, cog, slot, atype):
-        super().__init__()
-        self.cog, self.slot, self.atype = cog, slot, atype
+        aid = str(uuid.uuid4())[:8]
+        self.view.cog.data["bookings"][aid] = {
+            "user_id": itxn.user.id,
+            "time": slot,
+            "type": self.type.value,
+            "info": self.extra.value
+        }
+        self.view.cog.data["slots"].pop(idx)
+        self.view.cog.save_data()
 
-    async def on_submit(self, interaction: discord.Interaction):
-        aid = uuid.uuid4().hex[:6]
-        self.cog.data["appointments"][aid] = {"user_id": interaction.user.id, "time": self.slot, "type": self.atype, "info": self.info.value}
-        if self.slot in self.cog.data["open_slots"]: self.cog.data["open_slots"].remove(self.slot)
-        self.cog.save_data()
-        
-        role = interaction.guild.get_role(APPT_ROLE_ID)
-        if role: await interaction.user.add_roles(role)
-        await interaction.user.send(f"Confirmed! ID: {aid}")
-        await interaction.response.edit_message(content=f"Booked! ID: {aid}", view=None)
+        role = itxn.guild.get_role(CLIENT_ROLE)
+        await itxn.user.add_roles(role)
+        await itxn.user.send(f"Appointment Confirmed! ID: {aid}\nTime: {slot}")
+        await itxn.response.send_message(f"✅ Confirmed! ID: `{aid}` sent to DMs.", ephemeral=True)
 
-# --- THE MISSING LINK: SETUP FUNCTION ---
-async def setup(bot):
-    await bot.add_cog(AppointmentSystem(bot))
+async def setup(bot): await bot.add_cog(AppointmentSystem(bot))
